@@ -97,4 +97,4 @@ Runtime logs written to `/tmp/light_on_llm.log`. Useful for debugging state tran
 
 ## Author
 
-Jason Callahan — [Cali-ghub](https://github.com/Cali-ghub)
+[Cali-ghub](https://github.com/Cali-ghub)
