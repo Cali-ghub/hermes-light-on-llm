@@ -1,5 +1,5 @@
 name: light-on-llm
 version: 1.0.0
 kind: standalone
-author: Jason & Hermes
-description: A universal status indicator for the Hermes Agent using a Hubitat-controlled light.
+author: Cali-ghub & Hermes
+description: A universal status indicator for the Hermes Agent — supports Philips Hue Bridge (direct) and Hubitat Maker API backends.
