@@ -1,94 +1,108 @@
-# light-on-llm — Hermes Agent Plugin
+# light-on-llm
 
-Controls a smart light based on LLM agent state. Provides at-a-glance visual feedback for long-running AI tasks. Supports **Philips Hue Bridge** (direct API) and **Hubitat Maker API** backends.
+A visual status indicator for Hermes Agent that drives a smart light based on agent state.
 
-## States
+This repo now covers **both plugin surfaces**:
 
-| State | Color | When |
-|-------|-------|------|
-| **THINKING** | 🔴 Red (dim) | Agent is processing — LLM calls, tool execution, multi-step workflows |
-| **WAITING** | 🔵 Blue | Agent needs user approval for a dangerous command |
-| **IDLE** | 🟢 Green (very dim) | Agent finished, ready for next prompt |
+1. **Hermes plugin** for gateway / TUI / WebUI / cron runs
+2. **Hermes Desktop plugin** for the desktop app surface
+
+The current release shape is designed to be **publish-safe**:
+- no real IPs in source
+- no API keys in source
+- no user-specific scene IDs in source
+- configuration comes from environment variables only
+
+## Capability Summary
+
+| Capability | Status |
+|---|---|
+| Hermes plugin hooks (`pre_llm_call`, `post_llm_call`, approval hooks) | ✅ |
+| Local vs cloud color distinction | ✅ |
+| Cron-specific color | ✅ |
+| Philips Hue direct light writes | ✅ |
+| Hubitat Maker API fallback | ✅ |
+| Desktop plugin support | ✅ |
+| Debounce / redundant-update suppression | ✅ |
+| Publish-safe config defaults | ✅ |
+
+## State Model
+
+| Agent state | Meaning | Default color |
+|---|---|---|
+| `THINKING` | Agent is actively processing | Red for local models, purple for cloud models, amber for cron |
+| `WAITING` | Agent is waiting for approval | Blue |
+| `IDLE` | Agent finished and is ready | Green |
+
+## Repository Layout
+
+```text
+.
+├── __init__.py                     # Hermes plugin hooks (gateway/TUI/WebUI/cron)
+├── plugin.yaml                     # Hermes plugin manifest
+├── dashboard/
+│   ├── manifest.json              # API manifest for the Hermes plugin package
+│   └── plugin_api.py              # Shared REST endpoint for local light updates
+├── desktop-plugin/
+│   ├── manifest.json              # Hermes Desktop plugin manifest
+│   ├── plugin.js                  # Desktop frontend polling/status widget
+│   └── dashboard/
+│       └── plugin_api.py          # Desktop REST endpoint for light updates
+└── README.md
+```
 
 ## How It Works
 
-Uses Hermes Agent plugin hooks — no core modifications:
+### Hermes plugin surface
+Uses Hermes lifecycle hooks:
 
-- `pre_llm_call` → Red (fires once per complete agent run)
-- `post_llm_call` → Green (fires after ALL turns finish)
-- `pre_approval_request` → Blue (approval prompt shown)
-- `post_approval_response` → Red (agent resumes after approval)
+- `pre_llm_call` → `THINKING`
+- `post_llm_call` → `IDLE`
+- `pre_approval_request` → `WAITING`
+- `post_approval_response` → `THINKING`
+- `on_session_start` → logging/visibility only
 
-Works across **TUI, WebUI, Signal, Telegram** — any platform that loads Hermes plugins.
+### Model-aware colors
+- **Local GGUF models** → red thinking state
+- **Cloud/provider-hosted models** → purple thinking state
+- **Cron platform** → amber thinking state
 
-## Backends
+### Desktop surface
+The desktop plugin polls for active/running sessions and updates the same light via a small REST bridge.
 
-| Backend | Pros | Cons |
-|---------|------|------|
-| **Hue Bridge** (default) | Lower latency (~50ms), precise color, scene support | Requires Hue bridge + API key |
-| **Hubitat** | Single intermediary for mixed ecosystems, no extra auth | Extra hop (~200-400ms), less granular color control |
+## Configuration
 
-Set via `LIGHT_BACKEND` env var (`hue` or `hubitat`). Defaults to `hue`.
+All runtime configuration is env-var driven.
+
+### Common
+```bash
+LIGHT_BACKEND="hue"   # or: hubitat
+LIGHT_ON_LLM_LOG_FILE="/tmp/light_on_llm.log"
+```
+
+### Philips Hue
+```bash
+HUE_BRIDGE_URL="http://YOUR-HUE-BRIDGE-IP"
+HUE_API_KEY="your-hue-api-key"
+HUE_LIGHT_ID="your-light-id"
+```
+
+### Hubitat Maker API
+```bash
+HUBITAT_BASE_URL="http://YOUR-HUBITAT-IP/apps/api/YOUR_APP_ID/devices/YOUR_DEVICE_ID"
+HUBITAT_ACCESS_TOKEN="your-hubitat-maker-api-token"
+```
 
 ## Installation
 
-### 1. Clone the Plugin
+## 1) Hermes plugin (gateway / TUI / WebUI / cron)
+Clone the repo into the standard Hermes plugin location:
 
 ```bash
 git clone https://github.com/Cali-ghub/hermes-light-on-llm.git ~/.hermes/plugins/light-on-llm
 ```
 
-### 2. Configure Your Backend
-
-#### Option A: Philips Hue Bridge (recommended)
-
-Add to `~/.hermes/.env`:
-
-```bash
-LIGHT_BACKEND="hue"
-HUE_BRIDGE_URL="http://YOUR-HUE-BRIDGE-IP"
-HUE_API_KEY="your-hue-api-key"
-HUE_LIGHT_ID="31"
-# Optional: override scene IDs (defaults work if you use the same scenes)
-# HUE_SCENE_THINKING="..."   # e.g. a red scene named "LLMRed"
-# HUE_SCENE_IDLE="..."       # e.g. a green scene named "idle green"
-```
-
-**Finding your values:**
-
-| Variable | Where to Find It |
-|----------|------------------|
-| `HUE_BRIDGE_URL` | Your Hue bridge LAN IP (e.g., `http://192.168.1.x`) |
-| `HUE_API_KEY` | Generate by pressing the link button on your bridge and sending `POST /api/devicetype` — see [Philips Hue API docs](https://developers.meethue.com/) |
-| `HUE_LIGHT_ID` | Light number from `GET /api/key/lights` (e.g., `31`) |
-| `HUE_SCENE_THINKING` | Scene ID from `GET /api/key/scenes` — create scenes in the Hue app for THINKING and IDLE states |
-
-**Scene setup:** Create two scenes in the Hue app:
-- **THINKING**: Red, dim (~30% brightness) — name it "LLMRed" or similar
-- **IDLE**: Green, very dim (~10% brightness) — name it "idle green" or similar
-
-Scenes are recalled for THINKING and IDLE states. WAITING uses direct blue color.
-
-#### Option B: Hubitat Maker API (legacy)
-
-Add to `~/.hermes/.env`:
-
-```bash
-LIGHT_BACKEND="hubitat"
-HUBITAT_BASE_URL="http://YOUR-HUBITAT-IP/apps/api/YOUR_APP_ID/devices/YOUR_DEVICE_ID"
-HUBITAT_ACCESS_TOKEN="your-hubitat-maker-api-token"
-```
-
-| Variable | Where to Find It |
-|----------|------------------|
-| `YOUR-HUBITAT-IP` | Your Hubitat hub's LAN IP (e.g., `192.168.1.100`) |
-| `YOUR_APP_ID` | Maker API app ID from the URL (`/apps/api/APP_ID/...`) |
-| `YOUR_DEVICE_ID` | Device number from Hubitat's Devices page (e.g., `613`) |
-| `ACCESS_TOKEN` | "Access Token" field on the Maker API config page |
-
-### 3. Enable the Plugin
-
-Add to `~/.hermes/config.yaml`:
+Enable it in `~/.hermes/config.yaml`:
 
 ```yaml
 plugins:
@@ -96,40 +110,38 @@ plugins:
     - light-on-llm
 ```
 
-### 4. Restart Hermes Gateway
+Restart Hermes gateway after configuration changes.
+
+## 2) Hermes Desktop plugin
+Copy the desktop package into the Hermes Desktop plugins directory:
 
 ```bash
-sudo systemctl restart hermes-gateway
-# Or if running manually:
-hermes gateway run --replace
+mkdir -p ~/.hermes/desktop-plugins/light-on-llm
+cp -R ~/.hermes/plugins/light-on-llm/desktop-plugin/* ~/.hermes/desktop-plugins/light-on-llm/
 ```
 
-## Adapting for Other Smart Home Platforms
+This package contains its own `manifest.json`, `plugin.js`, and REST backend.
 
-The plugin architecture supports any HTTP-based smart home API. Add a new backend by:
+## Publish / privacy notes
 
-1. Creating `_yourplatform_*()` functions in `__init__.py`
-2. Adding your platform name to the `BACKEND` env var check
-3. Wiring state transitions in `_transition_to()`
+This repository intentionally avoids bundling:
+- personal names in plugin metadata
+- live bridge IPs
+- live access tokens or API keys
+- environment-specific scene IDs
+- household- or device-specific labels
 
-| Platform | Approach |
-|----------|----------|
-| **Home Assistant** | `POST /api/services/light/turn_on` with `color_hs`, `brightness`, `color_temp` |
-| **SmartThings** | SmartThings API v2: `PATCH /v1/devices/{id}` |
+If you fork or redistribute it, keep secrets in `.env` or your platform-specific secret manager.
 
-The hook registration and state machine logic stays the same — only the `_set_*` functions need changing.
+## Verification checklist
 
-## Log File
+Before release:
+- [ ] Python sources compile cleanly
+- [ ] JSON manifests parse cleanly
+- [ ] No hardcoded bridge IPs or API keys remain
+- [ ] Desktop plugin files are present
+- [ ] README matches actual capabilities
 
-Runtime logs written to `/tmp/light_on_llm.log`. Useful for debugging state transitions or API errors.
+## Versioning
 
-## Architecture
-
-- **Zero core modifications** — pure plugin, survives Hermes updates
-- **In-memory state tracking** — no shared files, no race conditions
-- **Deduplication** — skips redundant API calls when state hasn't changed
-- **Env var config** — credentials never in code, safe for version control
-
-## Author
-
-[Cali-ghub](https://github.com/Cali-ghub)
+This repo should be treated as **v2.x** and later if the combined Hermes + Desktop support remains part of the public contract.

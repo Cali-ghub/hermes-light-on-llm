@@ -1,0 +1,6 @@
+{
+  "id": "light-on-llm",
+  "name": "Light-on-LLM Desktop Indicator",
+  "version": "2.0.0",
+  "api": "dashboard/plugin_api.py"
+}
