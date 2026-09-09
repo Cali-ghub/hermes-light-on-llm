@@ -7,6 +7,7 @@ import json
 import os
 import time
 from typing import Optional
+from urllib.parse import quote, urlencode
 
 # --- Logging (direct file I/O — Hermes suppresses stdlib logging in plugins) ---
 LOG_FILE = os.environ.get("LIGHT_ON_LLM_LOG_FILE", "/tmp/light_on_llm.log")
@@ -112,12 +113,30 @@ HUBITAT_BASE = os.environ.get(
 ACCESS_TOKEN = os.environ.get("HUBITAT_ACCESS_TOKEN", "")
 
 
+def _hubitat_url(command_path: str) -> str:
+    """Build a Hubitat Maker API command URL with a correctly separated token query."""
+    return f"{HUBITAT_BASE.rstrip('/')}/{command_path.lstrip('/')}?{urlencode({'access_token': ACCESS_TOKEN})}"
+
+
+def _require_hubitat_config() -> bool:
+    if not ACCESS_TOKEN:
+        _log("Hubitat config incomplete: HUBITAT_ACCESS_TOKEN is required")
+        return False
+    if "YOUR-HUBITAT-IP" in HUBITAT_BASE or "YOUR_APP_ID" in HUBITAT_BASE or "YOUR_DEVICE_ID" in HUBITAT_BASE:
+        _log("Hubitat config incomplete: HUBITAT_BASE_URL still contains placeholder values")
+        return False
+    return True
+
+
 def _hubitat_set_color(hue: int, saturation: int, level: int) -> bool:
-    url = f"{HUBITAT_BASE}/setColor/%7B%22hue%22:{hue}%2C%22saturation%22:{saturation}%2C%22level%22:{level}%7D"
+    if not _require_hubitat_config():
+        return False
+
+    payload = quote(json.dumps({"hue": hue, "saturation": saturation, "level": level}, separators=(",", ":")), safe="")
+    command_path = f"setColor/{payload}"
     try:
-        import urllib.request, urllib.parse
-        params = urllib.parse.urlencode({"access_token": ACCESS_TOKEN})
-        resp = urllib.request.urlopen(f"{url}&{params}", timeout=5)
+        import urllib.request
+        resp = urllib.request.urlopen(_hubitat_url(command_path), timeout=5)
         if resp.status == 200:
             _log(f"Hubitat setColor OK (hue={hue}, sat={saturation}, level={level})")
             return True
@@ -127,11 +146,13 @@ def _hubitat_set_color(hue: int, saturation: int, level: int) -> bool:
 
 
 def _hubitat_set_color_temperature(temp: int, level: int) -> bool:
+    if not _require_hubitat_config():
+        return False
+
     try:
-        import urllib.request, urllib.parse
-        params = urllib.parse.urlencode({"access_token": ACCESS_TOKEN})
-        r1 = urllib.request.urlopen(f"{HUBITAT_BASE}/setColorTemperature/{temp}&{params}", timeout=5)
-        r2 = urllib.request.urlopen(f"{HUBITAT_BASE}/setLevel/{level}&{params}", timeout=5)
+        import urllib.request
+        r1 = urllib.request.urlopen(_hubitat_url(f"setColorTemperature/{temp}"), timeout=5)
+        r2 = urllib.request.urlopen(_hubitat_url(f"setLevel/{level}"), timeout=5)
         ok = (r1.status == 200 and r2.status == 200)
         if ok:
             _log(f"Hubitat setCT OK (temp={temp}K, level={level})")
@@ -169,51 +190,59 @@ def _light_spec(state: str, *, model: Optional[str] = None, platform: Optional[s
     return "unknown", tuple()
 
 
-def _set_light(state: str, *, model: Optional[str] = None, platform: Optional[str] = None) -> None:
-    """Actually set the light to a given state."""
+def _set_light(state: str, *, model: Optional[str] = None, platform: Optional[str] = None) -> bool:
+    """Actually set the light to a given state. Returns True only when the backend accepts it."""
     global _last_light_color
 
     color_key, _spec = _light_spec(state, model=model, platform=platform)
     if color_key == "unknown":
-        return
+        return False
 
     if _last_light_color == color_key:
-        return
+        return True
 
     if not _should_send():
         _log(f"SKIP (debounce): {state} too soon")
-        return
+        return False
 
-    _last_light_color = color_key
     _log(f"LIGHT SET: {state} ({color_key})")
+    ok = False
 
     if BACKEND == "hue":
         if state == "THINKING":
             if color_key == "cron":
                 _log(f"THINKING (cron: {model})")
-                _hue_set_color(hue_16bit=THINKING_CRON_HUE, sat_byte=255, bri_byte=THINKING_BRI)
+                ok = _hue_set_color(hue_16bit=THINKING_CRON_HUE, sat_byte=255, bri_byte=THINKING_BRI)
             elif model and _is_cloud_model(model):
                 _log(f"THINKING (cloud: {model})")
-                _hue_set_color(hue_16bit=THINKING_CLOUD_HUE, sat_byte=255, bri_byte=THINKING_BRI)
+                ok = _hue_set_color(hue_16bit=THINKING_CLOUD_HUE, sat_byte=255, bri_byte=THINKING_BRI)
             else:
                 _log(f"THINKING (local: {model})")
-                _hue_set_xy(xy=THINKING_LOCAL_XY, bri_byte=THINKING_BRI)
+                ok = _hue_set_xy(xy=THINKING_LOCAL_XY, bri_byte=THINKING_BRI)
         elif state == "WAITING":
-            _hue_set_color(hue_16bit=WAITING_HUE, sat_byte=255, bri_byte=WAITING_BRI)
+            ok = _hue_set_color(hue_16bit=WAITING_HUE, sat_byte=255, bri_byte=WAITING_BRI)
         elif state == "IDLE":
-            _hue_set_xy(xy=IDLE_XY, bri_byte=IDLE_BRI)
-    else:
+            ok = _hue_set_xy(xy=IDLE_XY, bri_byte=IDLE_BRI)
+    elif BACKEND == "hubitat":
         if state == "THINKING":
             if color_key == "cron":
-                _hubitat_set_color(hue=30, saturation=100, level=10)
+                ok = _hubitat_set_color(hue=30, saturation=100, level=10)
             elif model and _is_cloud_model(model):
-                _hubitat_set_color(hue=300, saturation=100, level=10)
+                ok = _hubitat_set_color(hue=80, saturation=100, level=10)
             else:
-                _hubitat_set_color(hue=0, saturation=100, level=10)
+                ok = _hubitat_set_color(hue=0, saturation=100, level=10)
         elif state == "WAITING":
-            _hubitat_set_color(hue=70, saturation=100, level=20)
+            ok = _hubitat_set_color(hue=70, saturation=100, level=20)
         elif state == "IDLE":
-            _hubitat_set_color_temperature(temp=2700, level=5)
+            ok = _hubitat_set_color_temperature(temp=2700, level=5)
+    else:
+        _log(f"Unknown LIGHT_BACKEND={BACKEND!r}; expected 'hue' or 'hubitat'")
+
+    if ok:
+        _last_light_color = color_key
+    else:
+        _log(f"LIGHT SET FAILED: {state} ({color_key})")
+    return ok
 
 
 def _transition_to(new_state: str, *, model: Optional[str] = None, platform: Optional[str] = None) -> None:
