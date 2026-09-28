@@ -5,6 +5,7 @@
 import datetime
 import json
 import os
+import threading
 import time
 from typing import Optional
 from urllib.parse import quote, urlencode
@@ -31,6 +32,22 @@ HUE_BRIDGE_URL = os.environ.get(
 HUE_API_KEY = os.environ.get("HUE_API_KEY", "")
 HUE_LIGHT_ID = os.environ.get("HUE_LIGHT_ID", "")
 
+
+def _parse_clock_time(variable: str, default: str) -> datetime.time:
+    """Read an HH:MM local-time setting, falling back safely on bad input."""
+    value = os.environ.get(variable, default)
+    try:
+        return datetime.time.fromisoformat(value)
+    except ValueError:
+        _log(f"Invalid {variable}={value!r}; using default {default}")
+        return datetime.time.fromisoformat(default)
+
+
+# Suppress only the idle state overnight. Active states continue to illuminate.
+IDLE_OFF_START = _parse_clock_time("LIGHT_IDLE_OFF_START", "23:30")
+IDLE_OFF_END = _parse_clock_time("LIGHT_IDLE_OFF_END", "06:00")
+_QUIET_HOURS_WATCH_INTERVAL_SECS = 15
+
 # Direct xy color coordinates and Hue values.
 # These are generic defaults for the state palette, not user-specific secrets.
 THINKING_LOCAL_XY = [0.6915, 0.3083]
@@ -49,6 +66,7 @@ _current_state = "IDLE"
 _last_light_color = None
 _last_scene_time = 0.0
 _DEBOUNCE_SECS = 1.5
+_quiet_hours_watcher_started = False
 
 
 def _should_send() -> bool:
@@ -175,6 +193,17 @@ def _is_cron_platform(platform: Optional[str]) -> bool:
     return str(platform or "").strip().lower() == "cron"
 
 
+def _is_idle_quiet_hours(now: Optional[datetime.time] = None) -> bool:
+    """Return whether local time is inside the configured overnight idle window."""
+    if IDLE_OFF_START == IDLE_OFF_END:
+        return False
+
+    now = now or datetime.datetime.now().time()
+    if IDLE_OFF_START < IDLE_OFF_END:
+        return IDLE_OFF_START <= now < IDLE_OFF_END
+    return now >= IDLE_OFF_START or now < IDLE_OFF_END
+
+
 def _light_spec(state: str, *, model: Optional[str] = None, platform: Optional[str] = None) -> tuple[str, tuple]:
     """Return a symbolic color key plus backend payload spec."""
     if state == "THINKING":
@@ -186,6 +215,8 @@ def _light_spec(state: str, *, model: Optional[str] = None, platform: Optional[s
     if state == "WAITING":
         return "blue", ("hue", WAITING_HUE, 255, WAITING_BRI)
     if state == "IDLE":
+        if _is_idle_quiet_hours():
+            return "off", ("off",)
         return "green", ("xy", IDLE_XY, IDLE_BRI)
     return "unknown", tuple()
 
@@ -222,7 +253,10 @@ def _set_light(state: str, *, model: Optional[str] = None, platform: Optional[st
         elif state == "WAITING":
             ok = _hue_set_color(hue_16bit=WAITING_HUE, sat_byte=255, bri_byte=WAITING_BRI)
         elif state == "IDLE":
-            ok = _hue_set_xy(xy=IDLE_XY, bri_byte=IDLE_BRI)
+            if color_key == "off":
+                ok = _hue_set_state({"on": False})
+            else:
+                ok = _hue_set_xy(xy=IDLE_XY, bri_byte=IDLE_BRI)
     elif BACKEND == "hubitat":
         if state == "THINKING":
             if color_key == "cron":
@@ -234,7 +268,10 @@ def _set_light(state: str, *, model: Optional[str] = None, platform: Optional[st
         elif state == "WAITING":
             ok = _hubitat_set_color(hue=70, saturation=100, level=20)
         elif state == "IDLE":
-            ok = _hubitat_set_color_temperature(temp=2700, level=5)
+            if color_key == "off":
+                ok = _hubitat_turn_off()
+            else:
+                ok = _hubitat_set_color_temperature(temp=2700, level=5)
     else:
         _log(f"Unknown LIGHT_BACKEND={BACKEND!r}; expected 'hue' or 'hubitat'")
 
@@ -255,6 +292,59 @@ def _transition_to(new_state: str, *, model: Optional[str] = None, platform: Opt
     _log(f"TRANSITION: {new_state} (was: {_current_state})")
     _current_state = new_state
     _set_light(new_state, model=model, platform=platform)
+
+
+def _hubitat_turn_off() -> bool:
+    """Turn off a Hubitat light during quiet idle hours."""
+    if not _require_hubitat_config():
+        return False
+
+    try:
+        import urllib.request
+        response = urllib.request.urlopen(_hubitat_url("off"), timeout=5)
+        if response.status == 200:
+            _log("Hubitat off OK")
+            return True
+    except Exception as e:
+        _log(f"Hubitat off error: {e}")
+    return False
+
+
+def _sync_idle_quiet_hours() -> None:
+    """Apply an idle quiet-hours boundary without disturbing active states."""
+    if _current_state != "IDLE":
+        return
+
+    color_key, _spec = _light_spec("IDLE")
+    if color_key != _last_light_color:
+        _log(f"Quiet-hours boundary: refreshing idle state as {color_key}")
+        _set_light("IDLE")
+
+
+def _quiet_hours_watcher() -> None:
+    while True:
+        time.sleep(_QUIET_HOURS_WATCH_INTERVAL_SECS)
+        try:
+            _sync_idle_quiet_hours()
+        except Exception as e:
+            _log(f"Quiet-hours watcher error: {e}")
+
+
+def _start_quiet_hours_watcher() -> None:
+    global _quiet_hours_watcher_started
+    if _quiet_hours_watcher_started:
+        return
+
+    _quiet_hours_watcher_started = True
+    threading.Thread(
+        target=_quiet_hours_watcher,
+        name="light-on-llm-quiet-hours",
+        daemon=True,
+    ).start()
+    _log(
+        "Quiet-hours watcher started "
+        f"(idle off {IDLE_OFF_START.strftime('%H:%M')}–{IDLE_OFF_END.strftime('%H:%M')} local)"
+    )
 
 
 # ====================================================================
@@ -300,5 +390,7 @@ def register(ctx):
     ctx.register_hook("on_session_start", on_session_start)
     ctx.register_hook("pre_approval_request", on_pre_approval_request)
     ctx.register_hook("post_approval_response", on_post_approval_response)
+
+    _start_quiet_hours_watcher()
 
     _log("All hooks registered successfully.")

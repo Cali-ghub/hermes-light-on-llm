@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.0
+
+- Add configurable local-time idle quiet hours, defaulting to 23:30–06:00.
+- Turn the light off only for `IDLE` during quiet hours; thinking, cron, and approval states remain illuminated.
+- Add a lightweight boundary watcher so an already-idle green light turns off at quiet-hours start and resumes normal idle behavior at its end.
+- Apply the same idle quiet-hours rule to both dashboard API surfaces.
+
 ## 2.0.1
 
 - Fix Hubitat Maker API URL construction so `access_token` is added with a query separator.

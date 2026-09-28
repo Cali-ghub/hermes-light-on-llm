@@ -18,6 +18,28 @@ HUE_BRIDGE_URL = os.environ.get("HUE_BRIDGE_URL", "http://YOUR-HUE-BRIDGE-IP").r
 HUE_API_KEY = os.environ.get("HUE_API_KEY", "")
 HUE_LIGHT_ID = os.environ.get("HUE_LIGHT_ID", "")
 
+
+def _parse_clock_time(variable: str, default: str) -> datetime.time:
+    value = os.environ.get(variable, default)
+    try:
+        return datetime.time.fromisoformat(value)
+    except ValueError:
+        _log(f"Invalid {variable}={value!r}; using default {default}")
+        return datetime.time.fromisoformat(default)
+
+
+IDLE_OFF_START = _parse_clock_time("LIGHT_IDLE_OFF_START", "23:30")
+IDLE_OFF_END = _parse_clock_time("LIGHT_IDLE_OFF_END", "06:00")
+
+
+def _is_idle_quiet_hours(now: datetime.time | None = None) -> bool:
+    if IDLE_OFF_START == IDLE_OFF_END:
+        return False
+    now = now or datetime.datetime.now().time()
+    if IDLE_OFF_START < IDLE_OFF_END:
+        return IDLE_OFF_START <= now < IDLE_OFF_END
+    return now >= IDLE_OFF_START or now < IDLE_OFF_END
+
 THINKING_LOCAL_XY = [0.6915, 0.3083]
 THINKING_CLOUD_HUE = 50000
 IDLE_XY = [0.2098, 0.5407]
@@ -79,7 +101,7 @@ async def set_light(body: dict) -> dict:
         elif state == "IDLE":
             result = _put_json(
                 _hue_light_url(),
-                {"xy": IDLE_XY, "bri": IDLE_BRI, "on": True},
+                {"on": False} if _is_idle_quiet_hours() else {"xy": IDLE_XY, "bri": IDLE_BRI, "on": True},
             )
         else:
             return {"success": False, "error": f"Unknown state {state}"}

@@ -44,7 +44,7 @@ The Hubitat backend is retained for users who already expose a light through Hub
 |---|---|---|
 | `THINKING` | Agent is actively processing | Red for local models, purple for cloud models, amber for cron |
 | `WAITING` | Agent is waiting for approval | Blue |
-| `IDLE` | Agent finished and is ready | Green |
+| `IDLE` | Agent finished and is ready | Green, except quiet hours (off) |
 
 ## Repository Layout
 
@@ -96,7 +96,16 @@ All runtime configuration is env-var driven.
 LIGHT_BACKEND="hue"   # Hermes plugin only: hue or hubitat. Defaults to hue.
 LIGHT_ON_LLM_LOG_FILE="/tmp/light_on_llm.log"
 LIGHT_ON_LLM_DESKTOP_LOG_FILE="/tmp/light_on_llm_desktop.log"
+# Suppress the idle-green lamp overnight using the server's local time.
+# Active thinking, cron, and approval states stay illuminated.
+LIGHT_IDLE_OFF_START="23:30"
+LIGHT_IDLE_OFF_END="06:00"
 ```
+
+`LIGHT_IDLE_OFF_START` and `LIGHT_IDLE_OFF_END` accept 24-hour `HH:MM` values.
+The default window crosses midnight (23:30–06:00). Set both values to the same
+time to disable quiet hours. A lightweight plugin watcher applies the idle
+transition at both boundaries even if Hermes receives no message at that moment.
 
 ### Philips Hue direct bridge control — recommended
 

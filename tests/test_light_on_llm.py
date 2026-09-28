@@ -45,6 +45,44 @@ class LightOnLlmTests(unittest.TestCase):
         self.assertEqual(plugin._light_spec("WAITING")[0], "blue")
         self.assertEqual(plugin._light_spec("IDLE")[0], "green")
 
+    def test_idle_quiet_hours_cross_midnight_and_excludes_active_states(self):
+        plugin = load_plugin(LIGHT_IDLE_OFF_START="23:30", LIGHT_IDLE_OFF_END="06:00")
+
+        self.assertFalse(plugin._is_idle_quiet_hours(plugin.datetime.time(23, 29, 59)))
+        self.assertTrue(plugin._is_idle_quiet_hours(plugin.datetime.time(23, 30)))
+        self.assertTrue(plugin._is_idle_quiet_hours(plugin.datetime.time(5, 59, 59)))
+        self.assertFalse(plugin._is_idle_quiet_hours(plugin.datetime.time(6, 0)))
+
+        plugin._is_idle_quiet_hours = lambda: True
+        self.assertEqual(plugin._light_spec("IDLE")[0], "off")
+        self.assertEqual(plugin._light_spec("THINKING", model="model.gguf")[0], "red")
+        self.assertEqual(plugin._light_spec("WAITING")[0], "blue")
+
+    def test_idle_quiet_hours_turns_hue_light_off(self):
+        plugin = load_plugin(LIGHT_BACKEND="hue", HUE_API_KEY="KEY", HUE_LIGHT_ID="1")
+        plugin._is_idle_quiet_hours = lambda: True
+        payloads = []
+        plugin._hue_set_state = lambda payload: payloads.append(payload) or True
+
+        self.assertTrue(plugin._set_light("IDLE"))
+        self.assertEqual(payloads, [{"on": False}])
+        self.assertEqual(plugin._last_light_color, "off")
+
+    def test_quiet_hours_watcher_refreshes_only_idle_state(self):
+        plugin = load_plugin()
+        plugin._current_state = "IDLE"
+        plugin._last_light_color = "green"
+        plugin._is_idle_quiet_hours = lambda: True
+        calls = []
+        plugin._set_light = lambda state: calls.append(state) or True
+
+        plugin._sync_idle_quiet_hours()
+        self.assertEqual(calls, ["IDLE"])
+
+        plugin._current_state = "THINKING"
+        plugin._sync_idle_quiet_hours()
+        self.assertEqual(calls, ["IDLE"])
+
     def test_hubitat_set_color_builds_valid_maker_api_url(self):
         plugin = load_plugin(LIGHT_BACKEND="hubitat")
         plugin.HUBITAT_BASE = "http://hub/apps/api/277/devices/613"
